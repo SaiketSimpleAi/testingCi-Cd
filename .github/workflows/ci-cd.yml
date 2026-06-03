@@ -1,0 +1,138 @@
+name: CI/CD
+
+# When does this pipeline run?
+#  - On every push to main          -> test, build image, deploy to production
+#  - On every pull request to main  -> test + build only (NO deploy)
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel an in-progress run if a newer commit is pushed to the same ref.
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # GitHub Container Registry image name, e.g. ghcr.io/your-user/notes-api
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  # JOB 1 — TEST
+  # Runs unit/integration tests against a throwaway Postgres database
+  # that GitHub starts as a "service container" next to the job.
+  # ────────────────────────────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: notes
+          POSTGRES_PASSWORD: notes
+          POSTGRES_DB: notes
+        ports:
+          - 5432:5432
+        # Wait until Postgres is actually accepting connections before
+        # the job steps start running.
+        options: >-
+          --health-cmd "pg_isready -U notes -d notes"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://notes:notes@localhost:5432/notes
+      PGSSL: "false"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+
+  # ────────────────────────────────────────────────────────────────
+  # JOB 2 — BUILD & PUSH IMAGE
+  # Builds the Docker image and pushes it to GitHub Container Registry.
+  # `needs: test` means it only runs if tests passed.
+  # ────────────────────────────────────────────────────────────────
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # required to push to ghcr.io
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}   # auto-provided by Actions
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # Tag with both the commit SHA (immutable) and `latest`.
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ────────────────────────────────────────────────────────────────
+  # JOB 3 — DEPLOY TO RAILWAY
+  # Only on pushes to main (never on pull requests).
+  # Uses the Railway CLI with a token stored in GitHub Secrets.
+  # ────────────────────────────────────────────────────────────────
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Tie this job to a GitHub "production" environment so you can add
+    # required reviewers / protection rules in the repo settings.
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm i -g @railway/cli
+
+      - name: Deploy
+        id: deploy
+        env:
+          # Project token created in Railway -> Project -> Settings -> Tokens
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          # `railway up` builds & releases the service. Because we set a
+          # Dockerfile builder in railway.json, Railway uses our image.
+          railway up --service "${{ vars.RAILWAY_SERVICE }}" --ci
