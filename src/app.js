@@ -14,8 +14,8 @@ function createApp() {
   // Liveness/readiness probe. CI, Docker, and Railway all hit this
   // to decide whether the container is healthy.
   app.get('/health', (req, res) => {
-    res.json({ status: 'ok', uptime: process.uptime() });
-  });
+  res.json({ status: 'ok', uptime: process.uptime(), version: '1.1.0' });
+});
 
   app.use('/api/notes', notesRouter);
 
