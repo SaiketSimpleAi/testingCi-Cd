@@ -24,17 +24,19 @@ The API: `GET /health`, and CRUD on `/api/notes` (list, get, create, delete).
    you push to main
          │
          ▼
-┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
-│  1. TEST          │→ │  2. BUILD IMAGE   │→ │  3. DEPLOY        │
-│  npm ci + lint    │   │  docker build     │   │  railway up       │
-│  + jest against   │   │  push to GHCR     │   │  → production +   │
-│  a Postgres svc   │   │                   │   │  managed Postgres │
-└──────────────────┘   └──────────────────┘   └──────────────────┘
-        (PRs run 1 & 2 only — never deploy)
+┌──────────────────┐   ┌──────────────────┐        ┌──────────────────┐
+│  1. TEST          │→ │  2. BUILD IMAGE   │   ╎    │  DEPLOY           │
+│  npm ci + lint    │   │  docker build     │   ╎    │  Railway watches  │
+│  + jest against   │   │  push to GHCR     │   ╎    │  the repo and     │
+│  a Postgres svc   │   │                   │   ╎    │  auto-deploys     │
+└──────────────────┘   └──────────────────┘        └──────────────────┘
+   ── GitHub Actions (quality gate) ──         ── Railway integration ──
 ```
 
-Each job only runs if the previous one passed (`needs:`). Pull requests get
-tested and built but **never deployed** — only a push to `main` reaches step 3.
+GitHub Actions runs the **test → build** quality gate (each job only runs if the
+previous passed). **Deployment is handled by Railway's GitHub integration**, which
+watches `main` and auto-deploys using `railway.json`. PRs are tested + built but
+never deployed.
 
 ---
 
@@ -155,3 +157,4 @@ files — safe to redeploy repeatedly. To evolve the schema, add
   you scale past one instance.
 - Add a security scan (e.g. `npm audit` / Trivy image scan) as a CI job.
 - Pin base images by digest and enable Dependabot.
+# testingCi-Cd

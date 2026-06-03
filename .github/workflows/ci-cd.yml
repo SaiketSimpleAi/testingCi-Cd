@@ -106,33 +106,10 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ────────────────────────────────────────────────────────────────
-  # JOB 3 — DEPLOY TO RAILWAY
-  # Only on pushes to main (never on pull requests).
-  # Uses the Railway CLI with a token stored in GitHub Secrets.
+  # DEPLOYMENT
+  # Handled by Railway's GitHub integration, not this workflow:
+  # Railway watches the repo and auto-deploys every push to `main`
+  # using railway.json (Dockerfile builder + /health healthcheck).
+  # This pipeline's job is to gate quality — test + build the image —
+  # before that deploy happens.
   # ────────────────────────────────────────────────────────────────
-  deploy:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    # Tie this job to a GitHub "production" environment so you can add
-    # required reviewers / protection rules in the repo settings.
-    environment:
-      name: production
-      url: ${{ steps.deploy.outputs.url }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Railway CLI
-        run: npm i -g @railway/cli
-
-      - name: Deploy
-        id: deploy
-        env:
-          # Project token created in Railway -> Project -> Settings -> Tokens
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          # `railway up` builds & releases the service. Because we set a
-          # Dockerfile builder in railway.json, Railway uses our image.
-          railway up --service "${{ vars.RAILWAY_SERVICE }}" --ci
