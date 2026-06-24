@@ -11,11 +11,11 @@ function createApp() {
 
   app.use(express.json());
 
-  // Liveness/readiness probe. CI, Docker/Compose, and the post-deploy
-  // health check all hit this to decide whether the container is healthy.
+  // Liveness/readiness probe. CI, Nginx, and the post-deploy smoke check
+  // all hit this to decide whether the service is healthy.
   app.get('/health', (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime(), version: '1.1.0' });
-});
+    res.json({ status: 'ok', uptime: process.uptime(), version: '1.1.1' });
+  });
 
   app.use('/api/notes', notesRouter);
 
