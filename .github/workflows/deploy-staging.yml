@@ -39,7 +39,7 @@ jobs:
             echo "- **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with: { node-version: 24, cache: npm }
       - run: npm ci
       - run: npm test                                # gate insurance: integration suite + coverage
