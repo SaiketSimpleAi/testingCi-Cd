@@ -1,0 +1,73 @@
+name: deploy-prod
+# Gated promotion to the PROD VMs — NO build. Runs on a published GitHub Release,
+# resolves the release to its immutable main-<sha>, downloads that exact artifact,
+# and ships the same bytes STAGING validated to each regional VM (AU + EU).
+on:
+  release:
+    types: [published]              # fires on tag vX.Y.Z, not on merge
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.pin.outputs.sha }}
+    steps:
+      - name: Record who triggered this release
+        run: |
+          {
+            echo "### PROD release ${{ github.event.release.tag_name }}"
+            echo "- **Released by:** @${{ github.triggering_actor }}"
+            echo "- **Commit:** ${{ github.sha }}"
+            echo "- _The gate approver is recorded separately in the deployment record — see notify-slack.yml._"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - id: pin
+        # Pin to the exact commit the release was cut from — the bytes UAT signed off.
+        run: echo "sha=main-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+  promote:
+    needs: resolve
+    runs-on: ubuntu-latest
+    environment: production         # <-- THIS is the manual approval gate
+    strategy:
+      matrix:
+        region:
+          - { name: au, host_secret: PROD_HOST_AU }
+          - { name: eu, host_secret: PROD_HOST_EU }
+    steps:
+      - uses: actions/checkout@v4   # for scripts/deploy-release.sh
+      - uses: azure/login@v2
+        with:
+          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Download the SAME artifact STAGING validated
+        run: |
+          az storage blob download \
+            --account-name sasaiartifacts \
+            --container-name releases \
+            --name "notes-api/${{ needs.resolve.outputs.sha }}.tar.gz" \
+            --file "release.tar.gz"
+      - name: Ship to PROD VM and reload
+        env:
+          SSH_KEY:  ${{ secrets.PROD_SSH_KEY }}
+          SSH_HOST: ${{ secrets[matrix.region.host_secret] }}
+          SSH_USER: deploy
+          SHA:      ${{ needs.resolve.outputs.sha }}
+        run: |
+          install -m 600 /dev/stdin key <<< "$SSH_KEY"
+          mv release.tar.gz "notes-api-$SHA.tar.gz"
+          scp -i key -o StrictHostKeyChecking=accept-new \
+            "notes-api-$SHA.tar.gz" "$SSH_USER@$SSH_HOST:/tmp/"
+          ssh -i key -o StrictHostKeyChecking=accept-new \
+            "$SSH_USER@$SSH_HOST" "bash -s -- $SHA" < scripts/deploy-release.sh
+  notify:
+    needs: [resolve, promote]
+    if: ${{ always() }}                               # report success AND failure, across all regions
+    uses: ./.github/workflows/notify-slack.yml
+    secrets: inherit
+    with:
+      stage: "PROD ${{ github.event.release.tag_name }}"
+      result: ${{ needs.promote.result }}             # 'success' only if every region succeeded
+      actor: ${{ github.triggering_actor }}
+      ref: ${{ github.sha }}

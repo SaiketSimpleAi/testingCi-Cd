@@ -1,160 +1,104 @@
-# Notes API — Node.js + PostgreSQL with a full Docker CI/CD pipeline
+# Notes API — single-mainline CI/CD, build-once artifact on Azure VMs
 
-A deliberately small REST API used to demonstrate a **complete, production-style
-CI/CD pipeline**: local Docker development → automated tests in CI → Docker image
-build → automated deploy to **Railway** (with managed PostgreSQL).
+A deliberately small Node.js + PostgreSQL REST API that implements the team
+**single-mainline branching + CI/CD engineering standard**: work on one permanent
+branch (`main`), build **one** immutable artifact on merge, and promote those exact
+bytes through **two shared environments — STAGING then PROD** — running on our own
+**Azure VMs under PM2 behind Nginx**. Nothing is rebuilt downstream, so what QA
+signs off on STAGING is byte-for-byte what customers run in PROD.
 
 ```
-src/server.js  → boots HTTP server, runs migrations, handles graceful shutdown
+src/server.js  → boots HTTP server, optional boot migrations, graceful shutdown
 src/app.js     → Express app (no listen — so tests can import it)
 src/db.js      → shared Postgres connection pool, configured by env vars
 src/migrate.js → tiny dependency-free SQL migration runner
 src/routes/    → the /api/notes CRUD endpoints
 migrations/    → versioned .sql schema files
-tests/         → Jest + supertest integration tests (hit a real Postgres)
+tests/         → jest + supertest integration tests (PR gate)
+tests/e2e/     → post-deploy smoke test, run against the deployed STAGING VM
 ```
 
 The API: `GET /health`, and CRUD on `/api/notes` (list, get, create, delete).
 
 ---
 
-## The big picture
+## The model in one picture
 
 ```
-   you push to main
-         │
-         ▼
-┌──────────────────┐   ┌──────────────────┐        ┌──────────────────┐
-│  1. TEST          │→ │  2. BUILD IMAGE   │   ╎    │  DEPLOY           │
-│  npm ci + lint    │   │  docker build     │   ╎    │  Railway watches  │
-│  + jest against   │   │  push to GHCR     │   ╎    │  the repo and     │
-│  a Postgres svc   │   │                   │   ╎    │  auto-deploys     │
-└──────────────────┘   └──────────────────┘        └──────────────────┘
-   ── GitHub Actions (quality gate) ──         ── Railway integration ──
+feature/SA-123  ──PR──▶  main  ──merge──▶  BUILD ONCE                 ──▶  STAGING VM   ──▶  release vX.Y.Z  ──▶  PROD VMs
+  pr-checks:               (squash)         notes-api-main-<sha>.tar.gz       (auto:           (gated promotion:    (AU + EU)
+  test + build                              → Azure Blob (immutable)          pm2 reload,      download the SAME
+  (no deploy)                                                                 e2e + UAT)       artifact, no rebuild)
 ```
 
-GitHub Actions runs the **test → build** quality gate (each job only runs if the
-previous passed). **Deployment is handled by Railway's GitHub integration**, which
-watches `main` and auto-deploys using `railway.json`. PRs are tested + built but
-never deployed.
+There is exactly **one build**, on merge to `main`. Every step after that
+re-deploys the same bytes — STAGING runs the artifact, and publishing a release
+tag promotes that identical artifact to the PROD VMs behind a manual gate.
+
+| Trigger | Workflow | What happens |
+|---|---|---|
+| PR into `main` | [`pr-checks.yml`](.github/workflows/pr-checks.yml) | `npm test` (coverage gate) + `npm run build` (syntax check). No deploy. Green checks gate the merge. |
+| Push to `main` | [`deploy-staging.yml`](.github/workflows/deploy-staging.yml) | **Build the artifact once**, publish to immutable storage, ship to the STAGING VM, `pm2 reload`, run the e2e smoke suite. |
+| Publish release `vX.Y.Z` | [`deploy-prod.yml`](.github/workflows/deploy-prod.yml) | **No build.** Download that exact `main-<sha>` artifact and ship it to the PROD VMs (AU + EU) behind a manual approval gate. |
+
+Every deploy (and any failed PR check) reports outcome + who triggered it to
+Slack via [`notify-slack.yml`](.github/workflows/notify-slack.yml) — a feature
+toggle, off unless `SLACK_NOTIFICATIONS=true`.
+
+> **Note on language:** the engineering standard is written for a TypeScript
+> service (it has a `tsc --noEmit` typecheck step and compiles to `dist/`). This
+> service is plain JavaScript, so there is **no typecheck step** and the artifact
+> ships `src/` rather than a compiled `dist/`. Everything else — the branching,
+> the build-once artifact, the VM/PM2 promotion model, the gate — is applied as
+> written.
 
 ---
 
-## Step 0 — Run it locally (no Docker needed)
+## Run it locally (the optional DEV)
+
+There's nothing to spin up beyond Node and a Postgres to point at:
 
 ```bash
-cp .env.example .env          # local config
-# point DATABASE_URL at any local Postgres, then:
-npm install
-npm test                      # runs migrations + integration tests
-npm run dev                   # starts the API on http://localhost:3000
+nvm use                       # picks up .nvmrc → Node 24.x
+npm ci
+cp .env.example .env          # local, non-production values
+# point DATABASE_URL at a local or shared-dev Postgres, then:
+npm test                      # jest integration tests (needs Postgres) + coverage
+npm run dev                   # node --watch with --env-file=.env, on http://localhost:3000
 curl localhost:3000/health
 ```
 
-> ⚠️ **Gotcha for THIS folder:** the directory name `TestingCi:Cd` contains a
-> colon. On macOS/Linux the colon is the `PATH` separator, which breaks
-> `npm test`/`npm run …` (npm can't add `node_modules/.bin` to `PATH`). Either
-> run binaries directly (`./node_modules/.bin/jest`) **or rename the folder to
-> `TestingCi-Cd`**. This only affects local runs in this folder — on GitHub the
-> repo is checked out to a colon-free path, so CI is unaffected.
+> ⚠️ **Folder-name gotcha:** if this directory's name contains a colon (`:`),
+> npm can't add `node_modules/.bin` to `PATH` on macOS/Linux and `npm test` /
+> `npm run …` break. Keep the folder named `TestingCi-Cd` (hyphen). CI is
+> unaffected — GitHub checks out to a colon-free path.
 
-## Step 1 — Run the whole stack with Docker Compose
+---
+
+## Day-to-day workflow
 
 ```bash
-docker compose up --build     # starts Postgres + the app together
-curl localhost:3000/api/notes
+git checkout -b feature/SA-123-add-csv-export   # 1. short-lived branch off main
+# ... edit code ...
+git commit -am "add csv export"
+git push -u origin feature/SA-123-add-csv-export # 2. push the branch
+gh pr create                                     # 3. open a PR → pr-checks runs (NO deploy)
+# review the green checks, then:
+gh pr merge --squash                             # 4. squash-merge → builds + auto-deploys to STAGING
 ```
 
-`docker-compose.yml` defines two services — `db` (Postgres 16) and `app` (built
-from the `Dockerfile`). The app waits for the DB's healthcheck before starting,
-and runs migrations automatically on boot.
+- **On a PR:** `pr-checks` runs `npm test` + `npm run build`. It can't merge unless green.
+- **On merge to `main`:** the one build happens; the artifact auto-deploys to the STAGING VM and the e2e smoke suite runs.
+- **To ship to PROD:** after UAT signoff on STAGING, publish a GitHub Release `vX.Y.Z`. That promotes the **same** artifact to the PROD VMs (AU + EU) behind the approval gate.
 
-## Step 2 — Understand the production Docker image
-
-The `Dockerfile` is **multi-stage**:
-
-1. **`deps` stage** runs `npm ci --omit=dev` so only runtime deps land in the
-   image (no jest/eslint). Because dependencies are a separate layer, they're
-   only re-installed when `package*.json` changes — fast rebuilds.
-2. **`runner` stage** copies those deps + the source, runs as the non-root
-   `node` user, exposes port 3000, and defines a `HEALTHCHECK`.
-
-Smaller image, better cache hits, and it doesn't run as root.
+Branch naming, the freeze branch, the hotfix lane, multi-region, and the
+dependency policy all follow the engineering standard.
 
 ---
 
-## Step 3 — The CI/CD pipeline (`.github/workflows/ci-cd.yml`)
+## Deployment, rollback, and one-time VM setup
 
-### Job 1 — `test`
-- Spins up a **Postgres service container** alongside the runner and waits for
-  `pg_isready`.
-- `npm ci` (reproducible install from the lockfile) → `npm run lint` → `npm test`.
-- Tests run against that real Postgres via `DATABASE_URL`, exactly like prod.
-
-### Job 2 — `build-and-push` (`needs: test`)
-- Logs in to **GitHub Container Registry (GHCR)** using the auto-provided
-  `GITHUB_TOKEN` (no secret to create).
-- Builds the image and pushes two tags: the immutable commit SHA and `latest`.
-- Uses GitHub Actions build cache (`cache-from/to: type=gha`) for speed.
-
-### Job 3 — `deploy` (`needs: build-and-push`)
-- Guarded by `if: github.ref == 'refs/heads/main' && github.event_name == 'push'`
-  so it **never runs on PRs**.
-- Bound to a GitHub `production` environment — add required reviewers there for a
-  manual approval gate before deploys.
-- Installs the Railway CLI and runs `railway up`, authenticated by a
-  `RAILWAY_TOKEN` secret.
-
----
-
-## Step 4 — One-time setup to make it deploy
-
-### a) Push to GitHub
-```bash
-git init && git add . && git commit -m "initial commit"
-git branch -M main
-git remote add origin git@github.com:<you>/notes-api.git
-git push -u origin main
-```
-
-### b) Create the Railway project + database
-1. Create a project at <https://railway.app> and add a **PostgreSQL** plugin.
-2. Add a service from your GitHub repo (Railway detects `railway.json` and builds
-   with the `Dockerfile`).
-3. In the service **Variables**, set:
-   - `DATABASE_URL` → reference the Postgres plugin's connection string
-     (`${{Postgres.DATABASE_URL}}` in Railway's variable referencing).
-   - `PGSSL` → `true` (Railway's Postgres requires TLS).
-   - `PORT` → Railway injects this automatically; the app already reads it.
-
-### c) Wire the GitHub → Railway secret
-1. In Railway: **Project → Settings → Tokens** → create a **Project Token**.
-2. In GitHub: **Repo → Settings → Secrets and variables → Actions**
-   - Add a **secret** `RAILWAY_TOKEN` = the token from step 1.
-   - Add a **variable** `RAILWAY_SERVICE` = your Railway service name.
-
-### d) Ship it
-Push to `main`. Watch the run under the repo's **Actions** tab:
-`test` → `build-and-push` → `deploy`. When green, your API is live at the
-Railway-provided URL — verify with `curl https://<your-app>.up.railway.app/health`.
-
-> **Simpler alternative:** Railway can auto-deploy on every push if you connect
-> the repo directly in its dashboard — then you can delete Job 3 and keep CI
-> (test + build) in GitHub Actions only. The CLI approach here gives you explicit
-> control and an approval gate, which is closer to a real production setup.
-
----
-
-## How migrations stay safe
-`src/migrate.js` records applied files in a `schema_migrations` table and wraps
-each migration in a transaction. It runs on every boot but only applies new
-files — safe to redeploy repeatedly. To evolve the schema, add
-`migrations/002_*.sql`; it applies automatically on the next deploy.
-
-## Production checklist (beyond this demo)
-- Add `helmet`, rate limiting, and request validation (e.g. `zod`).
-- Run migrations as a separate release step, not on every replica's boot, once
-  you scale past one instance.
-- Add a security scan (e.g. `npm audit` / Trivy image scan) as a CI job.
-- Pin base images by digest and enable Dependabot.
-# testingCi-Cd
+See **[DEPLOYMENT.md](DEPLOYMENT.md)** for the full picture: the VM layout
+(`/srv/notes-api/{releases,current,shared}`), PM2 + Nginx, the artifact lifecycle,
+how migrations run as their own pre-cutover step, rollback (symlink flip via
+[`scripts/rollback.sh`](scripts/rollback.sh)), and the one-time setup checklist.

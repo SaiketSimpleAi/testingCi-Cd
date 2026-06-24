@@ -1,0 +1,10 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule: { interval: monthly }   # deliberate, batched — not continuous
+    open-pull-requests-limit: 10
+    # No auto-merge anywhere. Every update is a PR a human reviews (standard §13).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: monthly }

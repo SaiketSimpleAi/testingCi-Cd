@@ -9,7 +9,8 @@ const { Pool } = require('pg');
 // DATABASE_URL example: postgres://user:password@host:5432/dbname
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // Railway (and most managed Postgres) require TLS in production.
+  // Managed Postgres (RDS, etc.) often requires TLS; the VM's local
+  // Postgres container does not, so PGSSL stays "false" in production there.
   ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : false,
   max: Number(process.env.PG_POOL_MAX || 10),
 });
