@@ -1,0 +1,94 @@
+name: deploy-staging
+# The one and only build. The artifact assembled here is the only one that ever
+# ships — STAGING runs it, and the SAME bytes are later promoted to PROD by
+# deploy-prod.yml. Nothing downstream rebuilds (engineering standard §2).
+on:
+  push:
+    branches: [main]
+permissions:
+  id-token: write          # OIDC for the artifact upload to Azure Blob (storage only)
+  contents: read
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest   # or a self-hosted runner in the VNet (see network path note in §8)
+    # Cheap-insurance re-run of the gate needs a DB (the suite is integration).
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: notes
+          POSTGRES_PASSWORD: notes
+          POSTGRES_DB: notes
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U notes -d notes"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://notes:notes@localhost:5432/notes
+      PGSSL: "false"
+    steps:
+      - name: Record who triggered this deploy
+        run: |
+          {
+            echo "### STAGING deploy"
+            echo "- **Triggered by:** @${{ github.triggering_actor }}"
+            echo "- **Commit:** ${{ github.sha }}"
+            echo "- **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: npm test                                # gate insurance: integration suite + coverage
+      - run: npm run build                           # gate insurance: syntax check
+      - id: meta
+        run: echo "sha=main-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - name: Assemble the immutable artifact (build once)
+        run: |
+          npm prune --omit=dev                       # keep only production deps
+          # Plain-JS service: ship src/ (not a compiled dist/) + migrations + the
+          # pruned production node_modules + the lockfile. These exact bytes run
+          # on every VM, in every region.
+          tar -czf "notes-api-${{ steps.meta.outputs.sha }}.tar.gz" \
+            src migrations package.json package-lock.json node_modules
+      - uses: azure/login@v2                          # OIDC — used only to reach Blob Storage
+        with:
+          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Publish artifact to immutable storage
+        run: |
+          az storage blob upload \
+            --account-name sasaiartifacts \
+            --container-name releases \
+            --name "notes-api/${{ steps.meta.outputs.sha }}.tar.gz" \
+            --file "notes-api-${{ steps.meta.outputs.sha }}.tar.gz" \
+            --overwrite false          # never overwrite a SHA — the bytes are immutable
+      - name: Ship to STAGING VM and reload
+        env:
+          SSH_KEY:  ${{ secrets.STAGING_SSH_KEY }}
+          SSH_HOST: ${{ secrets.STAGING_HOST }}
+          SSH_USER: deploy
+          SHA:      ${{ steps.meta.outputs.sha }}
+        run: |
+          install -m 600 /dev/stdin key <<< "$SSH_KEY"
+          scp -i key -o StrictHostKeyChecking=accept-new \
+            "notes-api-$SHA.tar.gz" "$SSH_USER@$SSH_HOST:/tmp/"
+          ssh -i key -o StrictHostKeyChecking=accept-new \
+            "$SSH_USER@$SSH_HOST" "bash -s -- $SHA" < scripts/deploy-release.sh
+      - run: npm run test:e2e                         # heavy suite against the deployed STAGING VM
+        env:
+          E2E_BASE_URL: https://staging.notes-api.internal
+  notify:
+    needs: build-and-deploy
+    if: ${{ always() }}                               # report success AND failure
+    uses: ./.github/workflows/notify-slack.yml
+    secrets: inherit
+    with:
+      stage: STAGING
+      result: ${{ needs.build-and-deploy.result }}
+      actor: ${{ github.triggering_actor }}
+      ref: ${{ github.sha }}

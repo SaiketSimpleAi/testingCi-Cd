@@ -7,9 +7,14 @@ const db = require('./db');
 const PORT = process.env.PORT || 3000;
 
 async function start() {
-  // Apply any pending DB migrations before serving traffic.
-  // Safe to run on every boot — migrations are idempotent.
-  await runMigrations();
+  // Apply pending DB migrations before serving traffic.
+  // Local dev runs them on boot (idempotent, convenient). On the VMs this is
+  // disabled (RUN_MIGRATIONS_ON_BOOT=false in /srv/notes-api/shared/.env): the
+  // deploy step runs migrations once per release before the cutover
+  // (scripts/deploy-release.sh), so PM2 cluster workers never race on reload.
+  if (process.env.RUN_MIGRATIONS_ON_BOOT !== 'false') {
+    await runMigrations();
+  }
 
   const app = createApp();
   const server = app.listen(PORT, () => {

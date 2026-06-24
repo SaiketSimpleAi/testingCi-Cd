@@ -11,8 +11,8 @@ function createApp() {
 
   app.use(express.json());
 
-  // Liveness/readiness probe. CI, Docker, and Railway all hit this
-  // to decide whether the container is healthy.
+  // Liveness/readiness probe. CI, Docker/Compose, and the post-deploy
+  // health check all hit this to decide whether the container is healthy.
   app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime(), version: '1.1.0' });
 });
@@ -24,8 +24,8 @@ function createApp() {
     res.status(404).json({ error: 'not found' });
   });
 
-  // Centralized error handler
-  // eslint-disable-next-line no-unused-vars
+  // Centralized error handler. The 4-arg signature (incl. `next`) is what marks
+  // this as an Express error handler, even though `next` is unused.
   app.use((err, req, res, next) => {
     console.error(err);
     res.status(500).json({ error: 'internal server error' });

@@ -1,9 +1,37 @@
+# Dependencies
 node_modules
+
+# Test / coverage output
 coverage
+
+# Local environment config (never commit real env files; keep the example)
 .env
 .env.*
 !.env.example
-npm-debug.log
+
+# Build / deploy artifacts — assembled in CI, never committed.
+# The pipeline builds notes-api-main-<sha>.tar.gz and the prod step writes
+# release.tar.gz; the SSH deploy step writes a private key to a file named `key`.
+*.tar.gz
+*.tgz
+release.tar.gz
+/key
+
+# PM2 runtime (only relevant if PM2 ever runs from a checkout; the VM uses /srv)
+.pm2/
+*.pid
+*.pid.lock
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 *.log
+
+# OS / editor cruft
 .DS_Store
+.vscode/
+.idea/
+
+# Claude Code local settings
 .claude/

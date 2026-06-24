@@ -1,0 +1,35 @@
+name: notify-slack
+# Reusable workflow every other workflow calls as a final job, so a run reports
+# whether it SUCCEEDED or FAILED, the stage, who triggered it, the commit, and a
+# link to the logs. Feature-toggled: only posts when the repo variable
+# SLACK_NOTIFICATIONS is 'true' and SLACK_WEBHOOK_URL is set — otherwise a no-op.
+on:
+  workflow_call:
+    inputs:
+      stage:   { required: true,  type: string }   # "STAGING" | "PROD vX.Y.Z" | "PR checks"
+      result:  { required: true,  type: string }   # success | failure | cancelled
+      actor:   { required: true,  type: string }   # who triggered (github.triggering_actor)
+      ref:     { required: false, type: string, default: "" }
+    # secrets (SLACK_WEBHOOK_URL) come from the caller via `secrets: inherit`
+jobs:
+  post:
+    if: ${{ vars.SLACK_NOTIFICATIONS == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "${{ inputs.result == 'success' && ':white_check_mark:' || ':x:' }} ${{ inputs.stage }} — notes-api: ${{ inputs.result }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*${{ inputs.result == 'success' && ':white_check_mark: Succeeded' || ':x: Failed' }}* · *${{ inputs.stage }}* · `notes-api`\n*Triggered by:* `${{ inputs.actor }}`\n*Commit:* <${{ github.server_url }}/${{ github.repository }}/commit/${{ inputs.ref }}|${{ inputs.ref }}>\n*Logs:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|view run>"
+                  }
+                }
+              ]
+            }

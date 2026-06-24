@@ -1,0 +1,50 @@
+name: pr-checks
+# The required status check. It never deploys; it only fails.
+# Plain-JS project: no `tsc --noEmit` typecheck step (see §6 — typecheck is
+# dropped because there are no TypeScript sources). The gate is: unit/integration
+# tests with a coverage threshold + a build (syntax) check.
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    # The project's tests are integration tests — they need a real Postgres.
+    # A throwaway service container provides one, exactly like prod talks to PG.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: notes
+          POSTGRES_PASSWORD: notes
+          POSTGRES_DB: notes
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U notes -d notes"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://notes:notes@localhost:5432/notes
+      PGSSL: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }     # Node 24.x (>= 24.5) — pinned via .nvmrc + engines
+      - run: npm ci
+      - run: npm test                               # jest + coverage threshold (see package.json)
+      - run: npm run build                          # syntax check — proves the code parses before merge
+  notify:
+    needs: verify
+    # Failure-only on PRs to avoid channel noise — a green PR check is the default, not news.
+    if: ${{ always() && needs.verify.result == 'failure' }}
+    uses: ./.github/workflows/notify-slack.yml
+    secrets: inherit
+    with:
+      stage: "PR checks"
+      result: ${{ needs.verify.result }}
+      actor: ${{ github.triggering_actor }}
+      ref: ${{ github.sha }}
