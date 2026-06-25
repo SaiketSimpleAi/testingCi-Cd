@@ -14,7 +14,7 @@ function createApp() {
   // Liveness/readiness probe. CI, Nginx, and the post-deploy smoke check
   // all hit this to decide whether the service is healthy.
   app.get('/health', (req, res) => {
-    res.json({ status: 'ok', uptime: process.uptime(), version: '1.1.3' });
+    res.json({ status: 'ok', uptime: process.uptime(), version: '1.1.4' });
   });
 
   app.use('/api/notes', notesRouter);
