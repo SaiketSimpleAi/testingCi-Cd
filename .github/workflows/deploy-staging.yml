@@ -1,16 +1,18 @@
 name: deploy-staging
-# The one and only build. The artifact assembled here is the only one that ever
-# ships — STAGING runs it, and the SAME bytes are later promoted to PROD by
-# deploy-prod.yml. Nothing downstream rebuilds (engineering standard §2).
+# The one and only build, on merge to `main`. The artifact assembled here is the
+# only one that ever ships (engineering standard §2).
+#
+# Staging variant (current setup): no Azure Blob / OIDC yet — the build-once
+# tarball is scp'd straight to the staging VM over SSH. The immutable Blob store
+# and the gated PROD promotion can be added later without changing the build.
 on:
   push:
     branches: [main]
 permissions:
-  id-token: write          # OIDC for the artifact upload to Azure Blob (storage only)
   contents: read
 jobs:
   build-and-deploy:
-    runs-on: ubuntu-latest   # or a self-hosted runner in the VNet (see network path note in §8)
+    runs-on: ubuntu-latest
     # Cheap-insurance re-run of the gate needs a DB (the suite is integration).
     services:
       postgres:
@@ -51,22 +53,9 @@ jobs:
           npm prune --omit=dev                       # keep only production deps
           # Plain-JS service: ship src/ (not a compiled dist/) + migrations + the
           # pruned production node_modules + the lockfile. These exact bytes run
-          # on every VM, in every region.
+          # on the VM.
           tar -czf "notes-api-${{ steps.meta.outputs.sha }}.tar.gz" \
             src migrations package.json package-lock.json node_modules
-      - uses: azure/login@v2                          # OIDC — used only to reach Blob Storage
-        with:
-          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - name: Publish artifact to immutable storage
-        run: |
-          az storage blob upload \
-            --account-name sasaiartifacts \
-            --container-name releases \
-            --name "notes-api/${{ steps.meta.outputs.sha }}.tar.gz" \
-            --file "notes-api-${{ steps.meta.outputs.sha }}.tar.gz" \
-            --overwrite false          # never overwrite a SHA — the bytes are immutable
       - name: Ship to STAGING VM and reload
         env:
           SSH_KEY:  ${{ secrets.STAGING_SSH_KEY }}
@@ -79,9 +68,11 @@ jobs:
             "notes-api-$SHA.tar.gz" "$SSH_USER@$SSH_HOST:/tmp/"
           ssh -i key -o StrictHostKeyChecking=accept-new \
             "$SSH_USER@$SSH_HOST" "bash -s -- $SHA" < scripts/deploy-release.sh
-      - run: npm run test:e2e                         # heavy suite against the deployed STAGING VM
-        env:
-          E2E_BASE_URL: https://staging.notes-api.internal
+      # e2e smoke against the deployed STAGING URL is intentionally disabled until
+      # DNS/TLS for staging is in place. Re-enable once a reachable URL exists:
+      # - run: npm run test:e2e
+      #   env:
+      #     E2E_BASE_URL: https://<staging-host>
   notify:
     needs: build-and-deploy
     if: ${{ always() }}                               # report success AND failure
