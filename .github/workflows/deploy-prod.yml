@@ -35,7 +35,7 @@ jobs:
           - { name: au, host_secret: PROD_HOST_AU }
           - { name: eu, host_secret: PROD_HOST_EU }
     steps:
-      - uses: actions/checkout@v4   # for scripts/deploy-release.sh
+      - uses: actions/checkout@v7   # for scripts/deploy-release.sh
       - uses: azure/login@v2
         with:
           client-id:       ${{ secrets.AZURE_CLIENT_ID }}
